@@ -109,9 +109,11 @@ def make_genotype(phased_sites, sample, ref, pad = 0):
     region = get_genotype_region(phased_sites, pad)
     alleles = [(site.pos - 1, len(site.ref), site.samples[sample].alleles) for site in phased_sites]
     ref_seq = fetch_reference(ref, region)
-    haplotype1 = make_haplotype([(a[0], a[1], a[2][0]) for a in alleles], region, ref_seq)
-    haplotype2 = make_haplotype([(a[0], a[1], a[2][1]) for a in alleles], region, ref_seq)
-    return region, (haplotype1, haplotype2)
+    ploidy = min(len(a[2]) for a in alleles)
+    genotype = []
+    for i in range(ploidy):
+        genotype.append(make_haplotype([(a[0], a[1], a[2][i]) for a in alleles], region, ref_seq))
+    return genotype
 
 def calculate_alignment_score(read, haplotype):
     aligner = ssw.Aligner()
@@ -145,11 +147,13 @@ def split(phased_sites, ref, bam_iter, sample, bams_out, last_read=None):
                     last_read = read
                     break
             genotype = make_genotype(phased_sites, sample, ref, calculate_min_pad(reads, phase_region))
+            if len(genotype) > 2:
+                raise ValueError("Polyploid samples are not supported")
             for read in reads:
-                if read.is_unmapped:
+                if read.is_unmapped or len(genotype) == 1:
                     bams_out[2].write(read)
                 else:
-                    haplotype1_score, haplotype2_score = calculate_alignment_scores(read.query_sequence, genotype[1])
+                    haplotype1_score, haplotype2_score = calculate_alignment_scores(read.query_sequence, genotype)
                     if haplotype1_score > haplotype2_score:
                         bams_out[0].write(read)
                     elif haplotype2_score > haplotype1_score:
