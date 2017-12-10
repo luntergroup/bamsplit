@@ -2,6 +2,8 @@
 """
 
 import argparse
+import os
+import operator
 import pysam as ps
 import ssw
 
@@ -15,6 +17,18 @@ def parse_region(region_str):
         contig, rest = region_str.rsplit(':', 1)
         begin, end = rest.replace(',', '').split('-')
         return contig, int(begin), int(end)
+
+def make_bam(path, bam_in):
+    return ps.AlignmentFile(path, 'wb', template=bam_in)
+
+def make_out_bams(out_dir, bam_in, ploidy):
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+    if len(out_dir) > 0 and out_dir[-1] != '/':
+        out_dir += '/'
+    result = [make_bam(out_dir + "support_" + str(i) + ".bam", bam_in) for i in range(ploidy)]
+    result.append(make_bam(out_dir + "unassigned.bam", bam_in))
+    return result
 
 def fetch_reference(ref, region):
     return ref.fetch(region[0], region[1], region[2])
@@ -121,19 +135,19 @@ def calculate_alignment_score(read, haplotype):
     return alignment.score
 
 def calculate_alignment_scores(read, genotype):
-    return calculate_alignment_score(read, genotype[0]), calculate_alignment_score(read, genotype[1])
+    return [calculate_alignment_score(read, haplotype) for haplotype in genotype]
 
 def split(phased_sites, ref, bam_iter, sample, bams_out, last_read=None):
     if not is_empty(phased_sites):
         phase_region = get_encompassing_region(phased_sites)
         support_region = expand(phase_region, max_indel_size(phased_sites))
         if last_read and is_before(last_read, support_region):
-            bams_out[2].write(last_read)
+            bams_out[-1].write(last_read)
             last_read = None
         if not last_read:
             for read in bam_iter:
                 if read.is_unmapped or is_before(read, support_region):
-                    bams_out[2].write(read)
+                    bams_out[-1].write(read)
                 else:
                     last_read = read
                     break
@@ -147,19 +161,20 @@ def split(phased_sites, ref, bam_iter, sample, bams_out, last_read=None):
                     last_read = read
                     break
             genotype = make_genotype(phased_sites, sample, ref, calculate_min_pad(reads, phase_region))
-            if len(genotype) > 2:
-                raise ValueError("Polyploid samples are not supported")
+            if len(genotype) + 1 > len(bams_out):
+                raise ValueError("Found genotype with copy number "
+                                 + str(len(genotype)) + " but the given sample ploidy is "
+                                 + str(len(bams_out) - 1))
             for read in reads:
                 if read.is_unmapped or len(genotype) == 1:
-                    bams_out[2].write(read)
+                    bams_out[-1].write(read)
                 else:
-                    haplotype1_score, haplotype2_score = calculate_alignment_scores(read.query_sequence, genotype)
-                    if haplotype1_score > haplotype2_score:
-                        bams_out[0].write(read)
-                    elif haplotype2_score > haplotype1_score:
-                        bams_out[1].write(read)
+                    scores = calculate_alignment_scores(read.query_sequence, genotype)
+                    max_score_idx, max_score = min(enumerate(scores), key=operator.itemgetter(1))
+                    if scores.count(max_score) > 1:
+                        bams_out[-1].write(read)
                     else:
-                        bams_out[2].write(read)
+                        bams_out[max_score_idx].write(read)
     return last_read
 
 def split_contig(region, ref, bam_in, vcf, sample, bams_out):
@@ -173,9 +188,9 @@ def split_contig(region, ref, bam_in, vcf, sample, bams_out):
         phased_sites.append(site)
     last_read = split(phased_sites, ref, bam_iter, sample, bams_out, last_read)
     if last_read:
-        bams_out[2].write(last_read)
+        bams_out[-1].write(last_read)
     for read in bam_iter:
-        bams_out[2].write(read)
+        bams_out[-1].write(read)
 
 def run_bamsplit(ref, bam_in, vcf, sample, bams_out, region=None):
     if region:
@@ -185,20 +200,21 @@ def run_bamsplit(ref, bam_in, vcf, sample, bams_out, region=None):
             split_contig(contig, ref, bam_in, vcf, sample, bams_out)
 
 def main(options):
-    ref      = ps.FastaFile(options.ref)
-    bam_in   = ps.AlignmentFile(options.reads)
-    vcf      = ps.VariantFile(options.variants)
-    bam_out1_path = options.out1 if options.out1 else options.reads.replace("bam", "split1.bam")
-    bam_out2_path = options.out2 if options.out2 else options.reads.replace("bam", "split2.bam")
-    bam_out3_path = options.out_unassigned if options.out_unassigned else options.reads.replace("bam", "split-unassigned.bam")
-    bam_out1 = ps.AlignmentFile(bam_out1_path, 'wb', template=bam_in)
-    bam_out2 = ps.AlignmentFile(bam_out2_path, 'wb', template=bam_in)
-    bam_out3 = ps.AlignmentFile(bam_out3_path, 'wb', template=bam_in)
-    region = parse_region(options.region) if options.region else None
-    if len(vcf.header.samples) == 1:
-        run_bamsplit(ref, bam_in, vcf, vcf.header.samples[0], (bam_out1, bam_out2, bam_out3), region)
+    if options.ploidy > 1:
+        ref      = ps.FastaFile(options.ref)
+        bam_in   = ps.AlignmentFile(options.reads)
+        vcf      = ps.VariantFile(options.variants)
+        bams_out = make_out_bams(options.out_dir, bam_in, options.ploidy)
+        region = parse_region(options.region) if options.region else None
+        if len(vcf.header.samples) == 1:
+            run_bamsplit(ref, bam_in, vcf, vcf.header.samples[0], bams_out, region)
+            for bam in bams_out:
+                bam.close()
+                ps.index(bam.filename)
+        else:
+            print("ERROR: Input VCF file must contain one sample")
     else:
-        print("ERROR: Input VCF file must contain one sample")
+        print("Nothing to do for sample ploidy < 2")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -211,17 +227,15 @@ if __name__ == '__main__':
     parser.add_argument('-v', '--variants', type=str,
                         required=True,
                         help='Phased variant calls to split reads')
-    parser.add_argument('--out1', type=str,
-                        required=False,
-                        help='Output BAM path for reads supporting haplotype 1')
-    parser.add_argument('--out2', type=str,
-                        required=False,
-                        help='Output BAM path for reads supporting haplotype 2')
-    parser.add_argument('--out-unassigned', type=str,
-                        required=False,
-                        help='Output BAM path for reads that cannot be assigned to haplotype 1 or 2')
+    parser.add_argument('-o', '--out_dir', type=str,
+                        required=True,
+                        help='Directory to output split BAMs')
     parser.add_argument('--region', type=str,
                         required=False,
                         help='Region to split')
+    parser.add_argument('--ploidy', type=int,
+                        required=False,
+                        default=2,
+                        help='Ploidy of the sample')
     parsed, unparsed = parser.parse_known_args()
     main(parsed)
