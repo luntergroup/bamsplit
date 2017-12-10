@@ -21,6 +21,15 @@ def parse_region(region_str):
 def make_bam(path, bam_in):
     return ps.AlignmentFile(path, 'wb', template=bam_in)
 
+def get_filename(bam):
+    return bam.filename.decode("utf-8").split('/')[-1]
+
+def make_our_directory_readme(out_dir, bams_out):
+    with open(out_dir + "README.txt", 'w') as readme:
+        for i in range(len(bams_out) - 1):
+            readme.write(get_filename(bams_out[i]) + " contains reads assigned to haplotype " + str(i) + '\n')
+        readme.write(get_filename(bams_out[-1]) + " contains reads that cannot be unambiguously assigned to a single haplotype")
+
 def make_out_bams(out_dir, bam_in, ploidy):
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -28,6 +37,7 @@ def make_out_bams(out_dir, bam_in, ploidy):
         out_dir += '/'
     result = [make_bam(out_dir + "support_" + str(i) + ".bam", bam_in) for i in range(ploidy)]
     result.append(make_bam(out_dir + "unassigned.bam", bam_in))
+    make_our_directory_readme(out_dir, result)
     return result
 
 def fetch_reference(ref, region):
@@ -205,7 +215,7 @@ def main(options):
         bam_in   = ps.AlignmentFile(options.reads)
         vcf      = ps.VariantFile(options.variants)
         bams_out = make_out_bams(options.out_dir, bam_in, options.ploidy)
-        region = parse_region(options.region) if options.region else None
+        region   = parse_region(options.region) if options.region else None
         if len(vcf.header.samples) == 1:
             run_bamsplit(ref, bam_in, vcf, vcf.header.samples[0], bams_out, region)
             for bam in bams_out:
