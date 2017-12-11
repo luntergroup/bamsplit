@@ -159,14 +159,14 @@ def split(phased_sites, ref, bam_iter, sample, bams_out, last_read=None):
         if last_read and is_before(last_read, support_region):
             bams_out[-1].write(last_read)
             last_read = None
-        if not last_read:
+        if last_read is None:
             for read in bam_iter:
                 if read.is_unmapped or is_before(read, support_region):
                     bams_out[-1].write(read)
                 else:
                     last_read = read
                     break
-        if last_read and not is_after(last_read, support_region):
+        if last_read is not None and not is_after(last_read, support_region):
             reads = [last_read]
             last_read = None
             for read in bam_iter:
@@ -202,7 +202,7 @@ def split_contig(region, ref, bam_in, vcf, sample, bams_out):
             phased_sites.clear()
         phased_sites.append(site)
     last_read = split(phased_sites, ref, bam_iter, sample, bams_out, last_read)
-    if last_read:
+    if last_read is not None:
         bams_out[-1].write(last_read)
     for read in bam_iter:
         bams_out[-1].write(read)
