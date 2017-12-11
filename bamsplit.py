@@ -24,21 +24,24 @@ def make_bam(path, bam_in):
 def get_filename(bam):
     return bam.filename.decode("utf-8").split('/')[-1]
 
-def make_our_directory_readme(out_dir, bams_out):
+def make_our_directory_readme(out_dir, bams_out, bed_out):
     with open(out_dir + "README.txt", 'w') as readme:
         for i in range(len(bams_out) - 1):
-            readme.write(get_filename(bams_out[i]) + " contains reads assigned to haplotype " + str(i) + '\n')
-        readme.write(get_filename(bams_out[-1]) + " contains reads that cannot be unambiguously assigned to a single haplotype")
+            readme.write("'" + get_filename(bams_out[i]) + "' contains reads assigned to haplotype " + str(i) + '\n')
+        readme.write("'" + get_filename(bams_out[-1]) + "' contains reads that cannot be unambiguously assigned to a single haplotype\n")
+        if bed_out is not None:
+            readme.write("'" + bed_out.name.split('/')[-1] + "' contains phased regions containing supporting reads\n")
 
-def make_out_bams(out_dir, bam_in, ploidy):
+def make_out_files(out_dir, bam_in, ploidy):
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
     if len(out_dir) > 0 and out_dir[-1] != '/':
         out_dir += '/'
-    result = [make_bam(out_dir + "support_" + str(i) + ".bam", bam_in) for i in range(ploidy)]
-    result.append(make_bam(out_dir + "unassigned.bam", bam_in))
-    make_our_directory_readme(out_dir, result)
-    return result
+    bams_out = [make_bam(out_dir + "support_" + str(i) + ".bam", bam_in) for i in range(ploidy)]
+    bams_out.append(make_bam(out_dir + "unassigned.bam", bam_in))
+    bed_out = open(out_dir + "regions.bed", 'w')
+    make_our_directory_readme(out_dir, bams_out, bed_out)
+    return bams_out, bed_out
 
 def fetch_reference(ref, region):
     return ref.fetch(region[0], region[1], region[2])
@@ -58,6 +61,9 @@ def fetch_variants(vcf, region):
 def write_reads(reads, bam):
     for read in reads:
         bam.write(read)
+
+def write_bed_line(bed, region):
+    bed.write('\t'.join([str(part) for part in region]) + '\n')
 
 def is_phased(site, sample):
     return site.samples[sample].phased
@@ -152,7 +158,7 @@ def calculate_alignment_score(read, haplotype):
 def calculate_alignment_scores(read, genotype):
     return [calculate_alignment_score(read, haplotype) for haplotype in genotype]
 
-def split(phased_sites, ref, bam_iter, sample, bams_out, last_read=None):
+def split(phased_sites, ref, bam_iter, sample, bams_out, bed_out, last_read=None):
     if not is_empty(phased_sites):
         phase_region = get_encompassing_region(phased_sites)
         support_region = expand(phase_region, max_indel_size(phased_sites))
@@ -180,6 +186,7 @@ def split(phased_sites, ref, bam_iter, sample, bams_out, last_read=None):
                 raise ValueError("Found genotype with copy number "
                                  + str(len(genotype)) + " but the given sample ploidy is "
                                  + str(len(bams_out) - 1))
+            has_assigned_reads = False
             for read in reads:
                 if read.is_unmapped or len(genotype) == 1:
                     bams_out[-1].write(read)
@@ -190,39 +197,42 @@ def split(phased_sites, ref, bam_iter, sample, bams_out, last_read=None):
                         bams_out[-1].write(read)
                     else:
                         bams_out[max_score_idx].write(read)
+                        has_assigned_reads = True
+            if bed_out is not None and has_assigned_reads:
+                write_bed_line(bed_out, phase_region)
     return last_read
 
-def split_contig(region, ref, bam_in, vcf, sample, bams_out):
+def split_contig(region, ref, bam_in, vcf, sample, bams_out, bed_out):
     bam_iter = fetch_reads(bam_in, region)
     phased_sites = []
     last_read = None
     for site in fetch_variants(vcf, region):
         if not (is_empty(phased_sites) or are_in_phase(phased_sites[0], site, sample)):
-            last_read = split(phased_sites, ref, bam_iter, sample, bams_out, last_read)
+            last_read = split(phased_sites, ref, bam_iter, sample, bams_out, bed_out, last_read)
             phased_sites.clear()
         phased_sites.append(site)
-    last_read = split(phased_sites, ref, bam_iter, sample, bams_out, last_read)
+    last_read = split(phased_sites, ref, bam_iter, sample, bams_out, bed_out, last_read)
     if last_read is not None:
         bams_out[-1].write(last_read)
     for read in bam_iter:
         bams_out[-1].write(read)
 
-def run_bamsplit(ref, bam_in, vcf, sample, bams_out, region=None):
+def run_bamsplit(ref, bam_in, vcf, sample, bams_out, bed_out=None, region=None):
     if region:
-        split_contig(region, ref, bam_in, vcf, sample, bams_out)
+        split_contig(region, ref, bam_in, vcf, sample, bams_out, bed_out)
     else:
         for contig in vcf.header.contigs:
-            split_contig(contig, ref, bam_in, vcf, sample, bams_out)
+            split_contig(contig, ref, bam_in, vcf, sample, bams_out, bed_out)
 
 def main(options):
     if options.ploidy > 1:
         ref      = ps.FastaFile(options.ref)
         bam_in   = ps.AlignmentFile(options.reads)
         vcf      = ps.VariantFile(options.variants)
-        bams_out = make_out_bams(options.out_dir, bam_in, options.ploidy)
+        bams_out, bed_out = make_out_files(options.out_dir, bam_in, options.ploidy)
         region   = parse_region(options.region) if options.region else None
         if len(vcf.header.samples) == 1:
-            run_bamsplit(ref, bam_in, vcf, vcf.header.samples[0], bams_out, region)
+            run_bamsplit(ref, bam_in, vcf, vcf.header.samples[0], bams_out, bed_out, region)
             for bam in bams_out:
                 bam.close()
                 ps.index(bam.filename)
