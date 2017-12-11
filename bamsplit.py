@@ -118,14 +118,19 @@ def get_genotype_region(phased_sites, pad):
     end = phased_sites[-1].pos - 1 + len(phased_sites[-1].ref) + pad
     return phased_sites[0].contig, begin, end
 
+def is_missing(allele):
+    return allele[-1] is None or '*' in allele[-1]
+
 def make_haplotype(alleles, region, ref_seq):
     result = ""
     ref_idx = 0
     for allele in alleles:
-        next_ref_idx = allele[0] - region[1]
+        next_ref_idx = max(allele[0] - region[1], ref_idx)
         result += ref_seq[ref_idx : next_ref_idx] # ref sub-sequence before allele
-        result += allele[-1] # allele sequence
-        ref_idx = next_ref_idx + allele[1]
+        ref_idx = next_ref_idx
+        if not is_missing(allele):
+            result += allele[-1] # allele sequence
+            ref_idx += allele[1]
     result += ref_seq[ref_idx:] # ref sub-sequence after last allele
     return result
 
